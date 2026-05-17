@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simulasi Perempatan Realistis Pro Max+++</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background: #222;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #fff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            background: #2ecc71; /* Rumput sekitar */
+        }
+        #scoreboard {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            background: rgba(0, 0, 0, 0.75);
+            padding: 12px 20px;
+            border-radius: 6px;
+            font-size: 14px;
+            pointer-events: none;
+            border: 1px solid #444;
+            backdrop-filter: blur(5px);
+        }
+        #scoreboard div {
+            margin-bottom: 5px;
+        }
+        #scoreboard span {
+            font-weight: bold;
+            color: #f1c40f;
+        }
+        .controls {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #2980b9;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="scoreboard">
+        <div>Fase Lampu: <span id="light-phase">Inisialisasi</span></div>
+        <div>Mobil Aktif: <span id="car-count">0</span></div>
+        <div>Pejalan Kaki: <span id="ped-count">0</span></div>
+    </div>
+    <canvas id="trafficCanvas" width="800" height="800"></canvas>
+</div>
+
+<div class="controls">
+    <button onclick="spawnCarForce()">Spawn Mobil</button>
+    <button onclick="spawnPedestrianForce()">Spawn Pejalan Kaki</button>
+</div>
+
+<script>
+const canvas = document.getElementById('trafficCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- KONFIGURASI DIMENSI PEREMPATAN ---
+const WIDTH = canvas.width;
+const HEIGHT = canvas.height;
+const ROAD_WIDTH = 160; 
+const LANE_WIDTH = ROAD_WIDTH / 2; // 80px per jalur
+const CENTER_X = WIDTH / 2;
+const CENTER_Y = HEIGHT / 2;
+
+// Batas jalan
+const ROAD_LEFT = CENTER_X - ROAD_WIDTH / 2;
+const ROAD_RIGHT = CENTER_X + ROAD_WIDTH / 2;
+const ROAD_TOP = CENTER_Y - ROAD_WIDTH / 2;
+const ROAD_BOTTOM = CENTER_Y + ROAD_WIDTH / 2;
+
+// --- STATE MANAGEMENT ---
+let cars = [];
+let pedestrians = [];
+let globalId = 0;
+
+// Sistem Lampu Lalu Lintas (Siklus 4 Fase Klasik)
+// Fase 0: Vertikal Hijau, Horizontal Merah
+// Fase 1: Vertikal Kuning, Horizontal Merah
+// Fase 2: Vertikal Merah, Horizontal Hijau
+// Fase 3: Vertikal Merah, Horizontal Kuning
+let trafficLightPhase = 0;
+let phaseTimer = 0;
+const PHASE_DURATIONS = [300, 60, 300, 60]; // Dalam hitungan frame (~60fps)
+
+// Penyeberangan Pejalan Kaki otomatis aktif saat lampu kuning/perubahan fase
+let pedestrianWalkSignal = false; 
+
+// Arah Gerakan
+const DIR_NORTH = 'N'; // Ke atas
+const DIR_SOUTH = 'S'; // Ke bawah
+const DIR_EAST = 'E';  // Ke kanan
+const DIR_WEST = 'W';  // Ke kiri
+
+// Palet Warna Kendaraan Realistis
+const CAR_COLORS = ['#e74c3c', '#3498db', '#f1c40f', '#34495e', '#ecf0f1', '#95a5a6', '#8e44ad', '#d35400'];
+
+// --- KELAS MOBIL ---
+class Car {
+    constructor(direction) {
+        this.id = globalId++;
+        this.dir = direction;
+        this.width = 24;
+        this.length = 45;
+        this.color = CAR_COLORS[Math.floor(Math.random() * CAR_COLORS.length)];
+        this.speed = 0;
+        this.maxSpeed = 2.5 + Math.random() * 1;
+        this.targetSpeed = this.maxSpeed;
+        this.accel = 0.1;
+        this.decel = 0.2;
+        this.hasPassedIntersection = false;
+
+        // Tentukan posisi awal berdasarkan arah asal
+        switch(direction) {
+            case DIR_SOUTH: // Dari Utara ke Selatan (Jalur Kiri Jalan Vertikal)
+                this.x = CENTER_X - LANE_WIDTH / 2;
+                this.y = -this.length;
+                break;
+            case DIR_NORTH: // Dari Selatan ke Utara (Jalur Kanan Jalan Vertikal)
+                this.x = CENTER_X + LANE_WIDTH / 2;
+                this.y = HEIGHT + this.length;
+                break;
+            case DIR_EAST: // Dari Barat ke Timur (Jalur Atas Jalan Horizontal)
+                this.x = -this.length;
+                this.y = CENTER_Y + LANE_WIDTH / 2;
+                break;
+            case DIR_WEST: // Dari Timur ke Barat (Jalur Bawah Jalan Horizontal)
+                this.x = WIDTH + this.length;
+                this.y = CENTER_Y - LANE_WIDTH / 2;
+                break;
+        }
+    }
+
+    update() {
+        // Cek apakah sudah melewati area konflik perempatan sepenuhnya
+        if (!this.hasPassedIntersection) {
+            if (this.dir === DIR_SOUTH && this.y > ROAD_BOTTOM) this.hasPassedIntersection = true;
+            if (this.dir === DIR_NORTH && this.y < ROAD_TOP) this.hasPassedIntersection = true;
+            if (this.dir === DIR_EAST && this.x > ROAD_RIGHT) this.hasPassedIntersection = true;
+            if (this.dir === DIR_WEST && this.x < ROAD_LEFT) this.hasPassedIntersection = true;
+        }
+
+        // Logika Pengereman & Sensor Jarak
+        this.targetSpeed = this.maxSpeed;
+        
+        // 1. Patuhi Lampu Lalu Lintas jika BELUM melewati perempatan
+        if (!this.hasPassedIntersection) {
+            const light = getLightStateForDirection(this.dir);
+            const stopLine = getStopLine(this.dir);
+
+            if (light === 'RED' || light === 'YELLOW') {
+                let distToStop = 0;
+                if (this.dir === DIR_SOUTH) distToStop = stopLine - (this.y + this.length / 2);
+                if (this.dir === DIR_NORTH) distToStop = (this.y - this.length / 2) - stopLine;
+                if (this.dir === DIR_EAST) distToStop = stopLine - (this.x + this.length / 2);
+                if (this.dir === DIR_WEST) distToStop = (this.x - this.length / 2) - stopLine;
+
+                // Jika mendekati garis stop, perlambat sampai berhenti
+                if (distToStop > 0 && distToStop < 140) {
+                    this.targetSpeed = Math.max(0, (distToStop / 140) * this.maxSpeed);
+                    if (distToStop < 15) this.targetSpeed = 0;
+                }
+            }
+        }
+
+        // 2. Deteksi Kendaraan di Depan (Mencegah Tabrakan)
+        let carInFront = getCarInFront(this);
+        if (carInFront) {
+            let distToCar = 0;
+            if (this.dir === DIR_SOUTH) distToCar = (carInFront.y - carInFront.length/2) - (this.y + this.length/2);
+            if (this.dir === DIR_NORTH) distToCar = (this.y - this.length/2) - (carInFront.y + carInFront.length/2);
+            if (this.dir === DIR_EAST) distToCar = (carInFront.x - carInFront.length/2) - (this.x + this.length/2);
+            if (this.dir === DIR_WEST) distToCar = (this.x - this.length/2) - (carInFront.x + carInFront.length/2);
+
+            if (distToCar > 0 && distToCar < 80) {
+                // Menyesuaikan kecepatan mobil di depan secara halus
+                this.targetSpeed = Math.min(this.targetSpeed, carInFront.speed * 0.8);
+                if (distToCar < 25) this.targetSpeed = 0; 
+            }
+        }
+
+        // 3. Deteksi Pejalan Kaki di Zebra Cross terdekat
+        if (pedestrians.length > 0) {
+            let isPedCrossingAhead = checkPedestrianHazard(this);
+            if (isPedCrossingAhead) {
+                this.targetSpeed = 0; // Rem mendadak demi keselamatan pejalan kaki
+            }
+        }
+
+        // Eksekusi Perubahan Kecepatan Akselerasi/Deselerasi Fisika Lembut
+        if (this.speed < this.targetSpeed) {
+            this.speed = Math.min(this.targetSpeed, this.speed + this.accel);
+        } else if (this.speed > this.targetSpeed) {
+            this.speed = Math.max(this.targetSpeed, this.speed - this.decel);
+        }
+
+        // Gerakkan koordinat posisi aktual
+        if (this.dir === DIR_SOUTH) this.y += this.speed;
+        if (this.dir === DIR_NORTH) this.y -= this.speed;
+        if (this.dir === DIR_EAST)  this.x += this.speed;
+        if (this.dir === DIR_WEST)  this.x -= this.speed;
+    }
+
+    draw() {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        
+        // Rotasi visual bodi mobil berdasarkan arah gerak
+        if (this.dir === DIR_NORTH) ctx.rotate(0);
+        if (this.dir === DIR_SOUTH) ctx.rotate(Math.PI);
+        if (this.dir === DIR_EAST) ctx.rotate(Math.PI / 2);
+        if (this.dir === DIR_WEST) ctx.rotate(-Math.PI / 2);
+
+        // Badan Utama Mobil
+        ctx.fillStyle = this.color;
+        ctx.fillRect(-this.width / 2, -this.length / 2, this.width, this.length);
+
+        // Kaca Depan & Belakang (Aksen Realistis)
+        ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        ctx.fillRect(-this.width / 2 + 2, -this.length / 2 + 10, this.width - 4, 6); // Depan
+        ctx.fillStyle = 'rgba(50,50,50,0.5)';
+        ctx.fillRect(-this.width / 2 + 2, this.length / 2 - 12, this.width - 4, 4); // Belakang
+
+        // Lampu Depan (Menyala saat bergerak)
+        ctx.fillStyle = '#fffde7';
+        ctx.fillRect(-this.width / 2 + 2, -this.length / 2 - 2, 4, 3);
+        ctx.fillRect(this.width / 2 - 6, -this.length / 2 - 2, 4, 3);
+
+        // Lampu Rem Belakang (Merah terang saat kecepatan melambat)
+        ctx.fillStyle = this.targetSpeed === 0 ? '#ff1744' : '#c0392b';
+        ctx.fillRect(-this.width / 2 + 2, this.length / 2 - 1, 4, 2);
+        ctx.fillRect(this.width / 2 - 6, this.length / 2 - 1, 4, 2);
+
+        ctx.restore();
+    }
+}
+
+// --- KELAS PEJALAN KAKI ---
+class Pedestrian {
+    constructor(zebraId) {
+        this.zebraId = zebraId; // 0: Utara, 1: Selatan, 2: Barat, 3: Timur
+        this.speed = 1.0 + Math.random() * 0.4;
+        this.size = 6;
+        this.color = ['#3498db', '#e67e22', '#2ecc71', '#e74c3c', '#f1c40f'][Math.floor(Math.random()*5)];
+        
+        // Pilih arah menyeberang secara acak (Maju atau Mundur melewati Zebra Cross)
+        this.side = Math.random() > 0.5 ? 1 : -1; 
+
+        // Set koordinat awal pas di ujung trotoar/zebra cross
+        if (zebraId === 0) { // Zebra Utara
+            this.x = (this.side === 1) ? ROAD_LEFT - 15 : ROAD_RIGHT + 15;
+            this.y = ROAD_TOP - 20;
+        } else if (zebraId === 1) { // Zebra Selatan
+            this.x = (this.side === 1) ? ROAD_LEFT - 15 : ROAD_RIGHT + 15;
+            this.y = ROAD_BOTTOM + 20;
+        } else if (zebraId === 2) { // Zebra Barat
+            this.x = ROAD_LEFT - 20;
+            this.y = (this.side === 1) ? ROAD_TOP - 15 : ROAD_BOTTOM + 15;
+        } else if (zebraId === 3) { // Zebra Timur
+            this.x = ROAD_RIGHT + 20;
+            this.y = (this.side === 1) ? ROAD_TOP - 15 : ROAD_BOTTOM + 15;
+        }
+    }
+
+    update() {
+        // Pejalan kaki hanya bergerak maju jika sinyal menyeberang aman atau sudah terlanjur di tengah jalan
+        let insideRoad = false;
+        if (this.zebraId <= 1) insideRoad = (this.x > ROAD_LEFT - 10 && this.x < ROAD_RIGHT + 10);
+        else insideRoad = (this.y > ROAD_TOP - 10 && this.y < ROAD_BOTTOM + 10);
+
+        if (pedestrianWalkSignal || insideRoad) {
+            if (this.zebraId === 0 || this.zebraId === 1) {
+                this.x += this.speed * this.side;
+            } else {
+                this.y += this.speed * this.side;
+            }
+        }
+    }
+
+    draw() {
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+        ctx.fillStyle = this.color;
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    }
+}
+
+// --- FUNGSI UTILITAS DETEKSI & LOGIKA ---
+
+function getLightStateForDirection(dir) {
+    // Memetakan fase global ke status warna lampu lokal tiap lajur jalan
+    if (trafficLightPhase === 0) {
+        return (dir === DIR_NORTH || dir === DIR_SOUTH) ? 'GREEN' : 'RED';
+    } else if (trafficLightPhase === 1) {
+        return (dir === DIR_NORTH || dir === DIR_SOUTH) ? 'YELLOW' : 'RED';
+    } else if (trafficLightPhase === 2) {
+        return (dir === DIR_NORTH || dir === DIR_SOUTH) ? 'RED' : 'GREEN';
+    } else if (trafficLightPhase === 3) {
+        return (dir === DIR_NORTH || dir === DIR_SOUTH) ? 'RED' : 'YELLOW';
+    }
+    return 'RED';
+}
+
+function getStopLine(dir) {
+    const offsetZebra = 45; // Garis stop berada tepat sebelum zebra cross
+    if (dir === DIR_SOUTH) return ROAD_TOP - offsetZebra;
+    if (dir === DIR_NORTH) return ROAD_BOTTOM + offsetZebra;
+    if (dir === DIR_EAST)  return ROAD_LEFT - offsetZebra;
+    if (dir === DIR_WEST)  return ROAD_RIGHT + offsetZebra;
+    return 0;
+}
+
+function getCarInFront(currentCar) {
+    let closestCar = null;
+    let minDistance = Infinity;
+
+    for (let car of cars) {
+        if (car.id === currentCar.id || car.dir !== currentCar.dir) continue;
+
+        let dist = 0;
+        if (currentCar.dir === DIR_SOUTH && car.y > currentCar.y) dist = car.y - currentCar.y;
+        else if (currentCar.dir === DIR_NORTH && car.y < currentCar.y) dist = currentCar.y - car.y;
+        else if (currentCar.dir === DIR_EAST && car.x > currentCar.x) dist = car.x - currentCar.x;
+        else if (currentCar.dir === DIR_WEST && car.x < currentCar.x) dist = currentCar.x - car.x;
+        else continue;
+
+        if (dist < minDistance) {
+            minDistance = dist;
+            closestCar = car;
+        }
+    }
+    return closestCar;
+}
+
+function checkPedestrianHazard(car) {
+    // Mengecek apakah ada pejalan kaki di jalur zebra cross depan mobil bersangkutan
+    for (let ped of pedestrians) {
+        if (car.dir === DIR_SOUTH && ped.zebraId === 0 && Math.abs(car.y - ped.y) < 60) return true;
+        if (car.dir === DIR_NORTH && ped.zebraId === 1 && Math.abs(car.y - ped.y) < 60) return true;
+        if (car.dir === DIR_EAST && ped.zebraId === 2 && Math.abs(car.x - ped.x) < 60) return true;
+        if (car.dir === DIR_WEST && ped.zebraId === 3 && Math.abs(car.x - ped.x) < 60) return true;
+    }
+    return false;
+}
+
+// --- ENGINE SPAWN OTOMATIS (REALISTIS DURASI KOSONG) ---
+function autoSpawnManager() {
+    const directions = [DIR_NORTH, DIR_SOUTH, DIR_EAST, DIR_WEST];
+    
+    // Hitung jumlah mobil per lajur asal
+    directions.forEach(dir => {
+        let count = cars.filter(c => c.dir === dir && !c.hasPassedIntersection).length;
+        // Jika jalan sepi/kosong di lajur tersebut, langsung panggil mobil baru otomatis
+        if (count === 0 && Math.random() < 0.02) {
+            cars.push(new Car(dir));
+        }
+    });
+
+    // Spawn Pejalan Kaki konstan secara acak berkala
+    if (pedestrians.length < 5 && Math.random() < 0.015) {
+        pedestrians.push(new Pedestrian(Math.floor(Math.random() * 4)));
+    }
+}
+
+function spawnCarForce() {
+    const dirs = [DIR_NORTH, DIR_SOUTH, DIR_EAST, DIR_WEST];
+    cars.push(new Car(dirs[Math.floor(Math.random() * 4)]));
+}
+
+function spawnPedestrianForce() {
+    pedestrians.push(new Pedestrian(Math.floor(Math.random() * 4)));
+}
+
+// --- FUNGSI MENGGAMBAR PEREMPATAN (GRAFIS HD & RAPI) ---
+function drawIntersectionBase() {
+    // 1. Aspal Jalan Utama
+    ctx.fillStyle = '#34495e';
+    ctx.fillRect(ROAD_LEFT, 0, ROAD_WIDTH, HEIGHT);
+    ctx.fillRect(0, ROAD_TOP, WIDTH, ROAD_WIDTH);
+
+    // Area Kotak Tengah Perempatan (Clean No Markings)
+    ctx.fillRect(ROAD_LEFT, ROAD_TOP, ROAD_WIDTH, ROAD_WIDTH);
+
+    // 2. Garis Pembatas Markah Jalan (Kuning Tengah & Putih Putus-putus)
+    ctx.strokeStyle = '#f1c40f'; // Markah Kuning Kontinu di tengah pembatas lajur ganda
+    ctx.lineWidth = 3;
+    
+    // Markah vertikal
+    ctx.beginPath();
+    ctx.setLineDash([15, 15]);
+    ctx.moveTo(CENTER_X, 0); ctx.lineTo(CENTER_X, ROAD_TOP - 40);
+    ctx.moveTo(CENTER_X, ROAD_BOTTOM + 40); ctx.lineTo(CENTER_X, HEIGHT);
+    // Markah horizontal
+    ctx.moveTo(0, CENTER_Y); ctx.lineTo(ROAD_LEFT - 40, CENTER_Y);
+    ctx.moveTo(ROAD_RIGHT + 40, CENTER_Y); ctx.lineTo(WIDTH, CENTER_Y);
+    ctx.stroke();
+    ctx.setLineDash([]); // Reset style
+
+    // 3. Menggambar Zebra Cross di 4 Sisi Perempatan
+    ctx.fillStyle = '#ffffff';
+    const zebraStripes = 7;
+    const stripeWidth = 8;
+    const stripeLength = 30;
+
+    // Zebra Cross Utara & Selatan (Garis Horisontal Berjejer)
+    for(let i=0; i<zebraStripes; i++) {
+        let offset = ROAD_LEFT + 12 + (i * 20);
+        ctx.fillRect(offset, ROAD_TOP - 35, stripeWidth, stripeLength); // Utara
+        ctx.fillRect(offset, ROAD_BOTTOM + 5, stripeWidth, stripeLength); // Selatan
+    }
+
+    // Zebra Cross Barat & Timur (Garis Vertikal Berjejer)
+    for(let i=0; i<zebraStripes; i++) {
+        let offset = ROAD_TOP + 12 + (i * 20);
+        ctx.fillRect(ROAD_LEFT - 35, offset, stripeLength, stripeWidth); // Barat
+        ctx.fillRect(ROAD_RIGHT + 5, offset, stripeLength, stripeWidth); // Timur
+    }
+
+    // 4. Garis Solid Stop Kendaraan sebelum Zebra Cross
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(ROAD_LEFT, ROAD_TOP - 40); ctx.lineTo(CENTER_X, ROAD_TOP - 40); // Lajur turun utara
+    ctx.moveTo(CENTER_X, ROAD_BOTTOM + 40); ctx.lineTo(ROAD_RIGHT, ROAD_BOTTOM + 40); // Lajur naik selatan
+    ctx.moveTo(ROAD_LEFT - 40, CENTER_Y); ctx.lineTo(ROAD_LEFT - 40, ROAD_BOTTOM); // Lajur kanan barat
+    ctx.moveTo(ROAD_RIGHT + 40, 0 + ROAD_TOP); ctx.lineTo(ROAD_RIGHT + 40, CENTER_Y); // Lajur kiri timur
+    ctx.stroke();
+}
+
+function drawTrafficLights() {
+    // Posisi Lampu Fisik Tiang di tiap Sudut Jalan
+    const lightsConfig = [
+        { x: ROAD_LEFT - 25, y: ROAD_TOP - 60, dir: DIR_SOUTH }, // Lampu Sisi Utara
+        { x: ROAD_RIGHT + 25, y: ROAD_BOTTOM + 60, dir: DIR_NORTH }, // Lampu Sisi Selatan
+        { x: ROAD_LEFT - 60, y: ROAD_BOTTOM + 25, dir: DIR_EAST },  // Lampu Sisi Barat
+        { x: ROAD_RIGHT + 60, y: ROAD_TOP - 25, dir: DIR_WEST }    // Lampu Sisi Timur
+    ];
+
+    lightsConfig.forEach(light => {
+        const state = getLightStateForDirection(light.dir);
+        
+        // Kotak wadah housing lampu hitam
+        ctx.fillStyle = '#111';
+        ctx.fillRect(light.x - 10, light.y - 20, 20, 40);
+
+        // Pengaturan render lingkaran warna aktif/redup realistis
+        ctx.beginPath();
+        ctx.arc(light.x, light.y - 10, 5, 0, Math.PI*2);
+        ctx.fillStyle = (state === 'RED') ? '#ff1744' : '#4c1c1c';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(light.x, light.y, 5, 0, Math.PI*2);
+        ctx.fillStyle = (state === 'YELLOW') ? '#ffea00' : '#4d4618';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(light.x, light.y + 10, 5, 0, Math.PI*2);
+        ctx.fillStyle = (state === 'GREEN') ? '#00e676' : '#144c2e';
+        ctx.fill();
+    });
+}
+
+// --- LOOP UTAMA GAME / SIMULASI ---
+function gameLoop() {
+    // 1. Logika Pengatur Waktu Siklus Lampu
+    phaseTimer++;
+    if (phaseTimer >= PHASE_DURATIONS[trafficLightPhase]) {
+        trafficLightPhase = (trafficLightPhase + 1) % 4;
+        phaseTimer = 0;
+    }
+    
+    // Pejalan kaki dipersilakan menyeberang saat mobil di salah satu lajur utama sedang lampu merah total
+    pedestrianWalkSignal = (trafficLightPhase === 0 || trafficLightPhase === 2);
+
+    // 2. Bersihkan & Gambar Ulang Kanvas Base
+    ctx.clearRect(0, 0, WIDTH, HEIGHT);
+    drawIntersectionBase();
+
+    // 3. Manajemen Spawner Sistem
+    autoSpawnManager();
+
+    // 4. Update & Draw Pejalan Kaki
+    for (let i = pedestrians.length - 1; i >= 0; i--) {
+        let ped = pedestrians[i];
+        ped.update();
+        ped.draw();
+
+        // Hapus objek jika sudah keluar layar peta simulasi
+        if (ped.x < -50 || ped.x > WIDTH + 50 || ped.y < -50 || ped.y > HEIGHT + 50) {
+            pedestrians.splice(i, 1);
+        }
+    }
+
+    // 5. Update & Draw Mobil
+    for (let i = cars.length - 1; i >= 0; i--) {
+        let car = cars[i];
+        car.update();
+        car.draw();
+
+        // Hapus mobil jika sudah sukses melewati batas luar wilayah peta simulator
+        if (car.x < -100 || car.x > WIDTH + 100 || car.y < -100 || car.y > HEIGHT + 100) {
+            cars.splice(i, 1);
+        }
+    }
+
+    // 6. Gambar Layer Teratas Lampu Lalu Lintas
+    drawTrafficLights();
+
+    // Update Papan Dashboard Info UI mini-game
+    const phaseNames = ["Vertikal Hijau", "Vertikal Kuning", "Horizontal Hijau", "Horizontal Kuning"];
+    document.getElementById('light-phase').innerText = phaseNames[trafficLightPhase];
+    document.getElementById('car-count').innerText = cars.length;
+    document.getElementById('ped-count').innerText = pedestrians.length;
+
+    requestAnimationFrame(gameLoop);
+}
+
+// Menjalankan simulasi pertama kali saat file dibuka
+gameLoop();
+</script>
+
+</body>
+</html>
